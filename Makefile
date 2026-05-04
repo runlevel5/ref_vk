@@ -191,6 +191,13 @@ ifeq ($(YQ2_ARCH), arm)
 CFLAGS += -march=armv6k
 endif
 
+# POWER (ppc64le) and ARM64 (aarch64): tune for the build host, raise
+# the optimisation level past -O2 so GCC auto-vectorises the lightmap
+# and per-vertex math paths with VSX/NEON, and unroll tight loops.
+ifneq (,$(filter $(YQ2_ARCH),ppc64le aarch64))
+CFLAGS += -mcpu=native -mtune=native -O3 -funroll-loops -fno-plt
+endif
+
 # ----------
 
 # Switch of some annoying warnings.
@@ -245,6 +252,13 @@ endif
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100839 for details.
 ifeq ($(COMPILER), gcc)
 override CFLAGS += -ffp-contract=off
+endif
+
+# Re-enable FMA contraction on ISAs where fused multiply-add is the
+# main reason -O3 wins (POWER VSX, ARM NEON). The defensive guard
+# above is a C++-only concern; our renderer is plain C.
+ifneq (,$(filter $(YQ2_ARCH),ppc64le aarch64))
+override CFLAGS += -ffp-contract=fast
 endif
 
 # ----------
