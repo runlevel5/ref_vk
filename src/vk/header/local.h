@@ -183,6 +183,23 @@ extern	float	r_viewproj_matrix[16];
 
 extern	float *s_blocklights, *s_blocklights_max;
 
+#define MAX_VK_DLIGHTS 32
+
+// std140-compatible single dynamic light: 32 bytes per entry
+typedef struct {
+	float origin[3];
+	float _padding;
+	float color[4];     // rgb = color, a = intensity
+} vk_dlight_data_t;
+
+typedef struct {
+	vk_dlight_data_t dlights[MAX_VK_DLIGHTS]; // 32 * 32 = 1024 bytes
+} vk_dlight_ubo_t;
+
+extern uint32_t            vk_dlightUboOffset;
+extern VkDescriptorSet     vk_dlightUboDescriptorSet;
+extern uint32_t            vk_numDynLights;
+
 void R_LightPoint (const bspxlightgrid_t *grid, vec3_t p, vec3_t color, entity_t *currententity);
 void R_PushDlights (void);
 
@@ -305,7 +322,6 @@ typedef struct
 } vkconfig_t;
 
 #define MAX_LIGHTMAPS 256
-#define DYNLIGHTMAP_OFFSET MAX_LIGHTMAPS
 
 typedef struct
 {
@@ -316,7 +332,7 @@ typedef struct
 
 	unsigned char *d_16to8table;
 
-	qvktexture_t lightmap_textures[MAX_LIGHTMAPS*2];
+	qvktexture_t lightmap_textures[MAX_LIGHTMAPS];
 
 	int currenttextures[2];
 	int currenttmu;
@@ -359,9 +375,11 @@ typedef struct {
 } polyvert_t;
 
 typedef struct {
-	float vertex[3];
-	float texCoord[2];
-	float texCoordLmap[2];
+	float    vertex[3];
+	float    texCoord[2];
+	float    texCoordLmap[2];
+	float    normal[3];
+	uint32_t lightFlags;
 } lmappolyvert_t;
 
 extern polyvert_t	*verts_buffer;

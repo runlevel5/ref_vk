@@ -827,11 +827,14 @@ static void DestroyDrawBuffers()
 // internal helper
 static void CreateDescriptorSetLayouts()
 {
+	// UBO descriptor sets are bound as both vertex-stage (model + push-relayed
+	// state) and fragment-stage (per-pixel dlights) by the lightmapped polygon
+	// pipeline. Listing both stages here keeps a single layout reusable.
 	VkDescriptorSetLayoutBinding layoutBinding = {
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 		.descriptorCount = 1,
-		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 		.pImmutableSamplers = NULL
 	};
 
@@ -1294,19 +1297,28 @@ static void CreatePipelines()
 	VK_VERTINFO(RGB_RGBA,  sizeof(float) * 7,	VK_INPUTATTR_DESC(0, VK_FORMAT_R32G32B32_SFLOAT, 0),
 												VK_INPUTATTR_DESC(1, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 3));
 
-	VK_VERTINFO(RGB_RG_RG, sizeof(float) * 7,	VK_INPUTATTR_DESC(0, VK_FORMAT_R32G32B32_SFLOAT, 0),
-												VK_INPUTATTR_DESC(1, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 3),
-												VK_INPUTATTR_DESC(2, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 5));
-
 	VK_VERTINFO(RGB_RGBA_RG, sizeof(float) * 9,	VK_INPUTATTR_DESC(0, VK_FORMAT_R32G32B32_SFLOAT, 0),
 												VK_INPUTATTR_DESC(1, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 3),
 												VK_INPUTATTR_DESC(2, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 7));
+	// position(3) + texcoord(2) + lightmap_texcoord(2) + normal(3) + lightFlags(uint)
+	VK_VERTINFO(LMAP, sizeof(lmappolyvert_t),	VK_INPUTATTR_DESC(0, VK_FORMAT_R32G32B32_SFLOAT, 0),
+												VK_INPUTATTR_DESC(1, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 3),
+												VK_INPUTATTR_DESC(2, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 5),
+												VK_INPUTATTR_DESC(3, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 7),
+												VK_INPUTATTR_DESC(4, VK_FORMAT_R32_UINT, sizeof(float) * 10));
 	// no vertices passed to the pipeline (postprocessing)
 	VkPipelineVertexInputStateCreateInfo vertInfoNull = VK_NULL_VERTEXINPUT_CINF;
 
 	// shared descriptor set layouts
 	VkDescriptorSetLayout samplerUboDsLayouts[] = { vk_samplerDescSetLayout, vk_uboDescSetLayout };
 	VkDescriptorSetLayout samplerUboLmapDsLayouts[] = { vk_samplerDescSetLayout, vk_uboDescSetLayout, vk_samplerLightmapDescSetLayout };
+	// lightmapped-polygon pipeline: same as samplerUboLmapDsLayouts plus a
+	// second UBO at set=3 used by the fragment shader to read per-frame
+	// dynamic-light data (origin, color, intensity).
+	VkDescriptorSetLayout samplerUboLmapDlightDsLayouts[] = {
+		vk_samplerDescSetLayout, vk_uboDescSetLayout,
+		vk_samplerLightmapDescSetLayout, vk_uboDescSetLayout
+	};
 
 	// shader array (vertex and fragment, no compute... yet)
 	qvkshader_t shaders[SHADER_INDEX_SIZE] = {0};
@@ -1406,7 +1418,7 @@ static void CreatePipelines()
 	// draw lightmapped polygon
 	VK_LOAD_VERTFRAG_SHADERS(shaders, polygon_lmap, polygon_lmap);
 	vk_drawPolyLmapPipeline.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	QVk_CreatePipeline(samplerUboLmapDsLayouts, 3, &vertInfoRGB_RG_RG, &vk_drawPolyLmapPipeline, &vk_renderpasses[RP_WORLD], shaders, 2);
+	QVk_CreatePipeline(samplerUboLmapDlightDsLayouts, 4, &vertInfoLMAP, &vk_drawPolyLmapPipeline, &vk_renderpasses[RP_WORLD], shaders, 2);
 	QVk_DebugSetObjectName((uint64_t)vk_drawPolyLmapPipeline.layout, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "Pipeline Layout: lightmapped polygon");
 	QVk_DebugSetObjectName((uint64_t)vk_drawPolyLmapPipeline.pl, VK_OBJECT_TYPE_PIPELINE, "Pipeline: lightmapped polygon");
 

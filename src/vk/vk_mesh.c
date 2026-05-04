@@ -111,7 +111,7 @@ Mesh_VertsRealloc(int count)
 	}
 	verts_buffer = ptr;
 
-	ptr = realloc(lmappolyverts_buffer, verts_count * sizeof(polyvert_t));
+	ptr = realloc(lmappolyverts_buffer, verts_count * sizeof(lmappolyvert_t));
 	if (!ptr)
 	{
 		return -1;

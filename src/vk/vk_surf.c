@@ -257,7 +257,6 @@ R_RenderBrushPoly(msurface_t *fa, const float *modelMatrix, float alpha,
 {
 	int			maps;
 	image_t		*image;
-	qboolean is_dynamic = false;
 	float		color[4] = { 1.f, 1.f, 1.f, alpha };
 	c_brush_polys++;
 
@@ -281,57 +280,34 @@ R_RenderBrushPoly(msurface_t *fa, const float *modelMatrix, float alpha,
 	//PGM
 	//======
 
-	/*
-	** check for lightmap modification
-	*/
+	// Re-upload the lightmap when an animated lightstyle changed this frame.
+	// Dynamic lights are now applied per-pixel in the lightmapped fragment
+	// shader, so dlight presence alone no longer triggers a CPU re-bake.
 	for (maps = 0; maps < MAXLIGHTMAPS && fa->styles[maps] != 255; maps++)
 	{
 		if (r_newrefdef.lightstyles[fa->styles[maps]].white != fa->cached_light[maps])
-			goto dynamic;
-	}
-
-	// dynamic this frame or dynamic previously
-	if (fa->dlightframe == r_framecount)
-	{
-	dynamic:
-		if (vk_dynamic->value)
 		{
-			if (!(fa->texinfo->flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP)))
+			if (vk_dynamic->value &&
+			    !(fa->texinfo->flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP)))
 			{
-				is_dynamic = true;
+				unsigned	temp[34 * 34];
+				int			smax, tmax;
+
+				smax = (fa->extents[0] >> fa->lmshift) + 1;
+				tmax = (fa->extents[1] >> fa->lmshift) + 1;
+
+				R_BuildLightMap(fa, (void *)temp, smax * 4);
+				R_SetCacheState(fa);
+
+				QVk_UpdateTextureData(&vk_state.lightmap_textures[fa->lightmaptexturenum],
+					(unsigned char *)temp, fa->light_s, fa->light_t, smax, tmax);
 			}
+			break;
 		}
 	}
 
-	if (is_dynamic)
-	{
-		if ((fa->styles[maps] >= 32 || fa->styles[maps] == 0) && (fa->dlightframe != r_framecount))
-		{
-			unsigned	temp[34 * 34];
-			int			smax, tmax;
-
-			smax = (fa->extents[0] >> fa->lmshift) + 1;
-			tmax = (fa->extents[1] >> fa->lmshift) + 1;
-
-			R_BuildLightMap(fa, (void *)temp, smax * 4);
-			R_SetCacheState(fa);
-
-			QVk_UpdateTextureData(&vk_state.lightmap_textures[fa->lightmaptexturenum], (unsigned char*)temp, fa->light_s, fa->light_t, smax, tmax);
-
-			fa->lightmapchain = vk_lms.lightmap_surfaces[fa->lightmaptexturenum];
-			vk_lms.lightmap_surfaces[fa->lightmaptexturenum] = fa;
-		}
-		else
-		{
-			fa->lightmapchain = vk_lms.lightmap_surfaces[0];
-			vk_lms.lightmap_surfaces[0] = fa;
-		}
-	}
-	else
-	{
-		fa->lightmapchain = vk_lms.lightmap_surfaces[fa->lightmaptexturenum];
-		vk_lms.lightmap_surfaces[fa->lightmaptexturenum] = fa;
-	}
+	fa->lightmapchain = vk_lms.lightmap_surfaces[fa->lightmaptexturenum];
+	vk_lms.lightmap_surfaces[fa->lightmaptexturenum] = fa;
 }
 
 
@@ -457,9 +433,11 @@ Vk_RenderLightmappedPoly(msurface_t *surf, const float *modelMatrix, float alpha
 	int		map;
 	float	*v;
 	image_t *image = R_TextureAnimation(currententity, surf->texinfo);
-	qboolean is_dynamic = false;
 	unsigned lmtex = surf->lightmaptexturenum;
 	vkpoly_t *p;
+	float	scroll;
+	vec3_t	normal;
+	uint32_t lightFlags;
 
 	struct {
 		float model[16];
@@ -484,22 +462,29 @@ Vk_RenderLightmappedPoly(msurface_t *surf, const float *modelMatrix, float alpha
 	uint8_t *uboData = QVk_GetUniformBuffer(sizeof(lmapPolyUbo), &uboOffset, &uboDescriptorSet);
 	memcpy(uboData, &lmapPolyUbo, sizeof(lmapPolyUbo));
 
+	// Animated lightstyles still require a CPU lightmap rebake. Dynamic lights
+	// are applied per-pixel in the fragment shader, so they no longer force
+	// re-upload here.
 	for (map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++)
 	{
 		if (r_newrefdef.lightstyles[surf->styles[map]].white != surf->cached_light[map])
-			goto dynamic;
-	}
-
-	/* dynamic this frame or dynamic previously */
-	if (surf->dlightframe == r_framecount)
-	{
-	dynamic:
-		if (vk_dynamic->value)
 		{
-			if (!(surf->texinfo->flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP)))
+			if (vk_dynamic->value &&
+			    !(surf->texinfo->flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP)))
 			{
-				is_dynamic = true;
+				unsigned	temp[128 * 128];
+				int			smax, tmax;
+
+				smax = (surf->extents[0] >> surf->lmshift) + 1;
+				tmax = (surf->extents[1] >> surf->lmshift) + 1;
+
+				R_BuildLightMap(surf, (void *)temp, smax * 4);
+				R_SetCacheState(surf);
+
+				QVk_UpdateTextureData(&vk_state.lightmap_textures[surf->lightmaptexturenum],
+					(unsigned char *)temp, surf->light_s, surf->light_t, smax, tmax);
 			}
+			break;
 		}
 	}
 
@@ -508,185 +493,69 @@ Vk_RenderLightmappedPoly(msurface_t *surf, const float *modelMatrix, float alpha
 		Com_Error(ERR_FATAL, "%s: can't allocate memory", __func__);
 	}
 
-	if (is_dynamic)
+	c_brush_polys++;
+
+	// Per-surface normal (flipped if behind the plane) and dlight bitmask. Both
+	// values are constant across the surface and so are written to every vertex
+	// of every poly chained off this surface.
+	if (surf->flags & SURF_PLANEBACK)
 	{
-		unsigned	temp[128 * 128];
-		int			smax, tmax;
-
-		smax = (surf->extents[0] >> surf->lmshift) + 1;
-		tmax = (surf->extents[1] >> surf->lmshift) + 1;
-
-		R_BuildLightMap(surf, (void *)temp, smax * 4);
-
-		if ((surf->styles[map] >= 32 || surf->styles[map] == 0) && (surf->dlightframe != r_framecount))
-		{
-			R_SetCacheState(surf);
-
-			lmtex = surf->lightmaptexturenum;
-			QVk_UpdateTextureData(&vk_state.lightmap_textures[surf->lightmaptexturenum], (unsigned char *)temp, surf->light_s, surf->light_t, smax, tmax);
-		}
-		else
-		{
-			lmtex = surf->lightmaptexturenum + DYNLIGHTMAP_OFFSET;
-			QVk_UpdateTextureData(&vk_state.lightmap_textures[lmtex], (unsigned char *)temp, surf->light_s, surf->light_t, smax, tmax);
-		}
-
-		c_brush_polys++;
-
-		//==========
-		//PGM
-		if (surf->texinfo->flags & SURF_FLOWING)
-		{
-			float scroll;
-
-			scroll = -64 * ((r_newrefdef.time / 40.0) - (int)(r_newrefdef.time / 40.0));
-			if (scroll == 0.0)
-				scroll = -64.0;
-
-			VkBuffer vbo;
-			VkDeviceSize vboOffset;
-			VkDescriptorSet descriptorSets[] = { image->vk_texture.descriptorSet, uboDescriptorSet, vk_state.lightmap_textures[lmtex].descriptorSet };
-			vkCmdBindDescriptorSets(vk_activeCmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_drawPolyLmapPipeline.layout, 0, 3, descriptorSets, 1, &uboOffset);
-
-			for (p = surf->polys; p; p = p->chain)
-			{
-				v = p->verts[0];
-				for (i = 0; i < nv; i++, v += VERTEXSIZE)
-				{
-					lmappolyverts_buffer[i].vertex[0] = v[0];
-					lmappolyverts_buffer[i].vertex[1] = v[1];
-					lmappolyverts_buffer[i].vertex[2] = v[2];
-					lmappolyverts_buffer[i].texCoord[0] = v[3] + scroll;
-					lmappolyverts_buffer[i].texCoord[1] = v[4];
-					lmappolyverts_buffer[i].texCoordLmap[0] = v[5];
-					lmappolyverts_buffer[i].texCoordLmap[1] = v[6];
-				}
-
-				uint8_t *vertData = QVk_GetVertexBuffer(sizeof(lmappolyvert_t) * nv, &vbo, &vboOffset);
-				memcpy(vertData, lmappolyverts_buffer, sizeof(lmappolyvert_t) * nv);
-
-				vkCmdBindVertexBuffers(vk_activeCmdbuffer, 0, 1, &vbo, &vboOffset);
-				vkCmdBindIndexBuffer(vk_activeCmdbuffer, QVk_GetTriangleFanIbo((nv - 2) * 3), 0, VK_INDEX_TYPE_UINT16);
-				vkCmdDrawIndexed(vk_activeCmdbuffer, (nv - 2) * 3, 1, 0, 0, 0);
-			}
-		}
-		else
-		{
-			VkBuffer vbo;
-			VkDeviceSize vboOffset;
-			VkDescriptorSet descriptorSets[] = {
-				image->vk_texture.descriptorSet,
-				uboDescriptorSet,
-				vk_state.lightmap_textures[lmtex].descriptorSet
-			};
-			vkCmdBindDescriptorSets(vk_activeCmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_drawPolyLmapPipeline.layout, 0, 3, descriptorSets, 1, &uboOffset);
-
-			for (p = surf->polys; p; p = p->chain)
-			{
-				v = p->verts[0];
-				for (i = 0; i < nv; i++, v += VERTEXSIZE)
-				{
-					lmappolyverts_buffer[i].vertex[0] = v[0];
-					lmappolyverts_buffer[i].vertex[1] = v[1];
-					lmappolyverts_buffer[i].vertex[2] = v[2];
-					lmappolyverts_buffer[i].texCoord[0] = v[3];
-					lmappolyverts_buffer[i].texCoord[1] = v[4];
-					lmappolyverts_buffer[i].texCoordLmap[0] = v[5];
-					lmappolyverts_buffer[i].texCoordLmap[1] = v[6];
-				}
-
-				uint8_t *vertData = QVk_GetVertexBuffer(sizeof(lmappolyvert_t) * nv, &vbo, &vboOffset);
-				memcpy(vertData, lmappolyverts_buffer, sizeof(lmappolyvert_t) * nv);
-
-				vkCmdBindVertexBuffers(vk_activeCmdbuffer, 0, 1, &vbo, &vboOffset);
-				vkCmdBindIndexBuffer(vk_activeCmdbuffer, QVk_GetTriangleFanIbo((nv - 2) * 3), 0, VK_INDEX_TYPE_UINT16);
-				vkCmdDrawIndexed(vk_activeCmdbuffer, (nv - 2) * 3, 1, 0, 0, 0);
-			}
-		}
-		//PGM
-		//==========
+		VectorNegate(surf->plane->normal, normal);
 	}
 	else
 	{
-		c_brush_polys++;
+		VectorCopy(surf->plane->normal, normal);
+	}
+	lightFlags = (surf->dlightframe == r_dlightframecount) ? (uint32_t)surf->dlightbits : 0u;
 
-		//==========
-		//PGM
-		if (surf->texinfo->flags & SURF_FLOWING)
+	scroll = 0.f;
+	if (surf->texinfo->flags & SURF_FLOWING)
+	{
+		scroll = -64 * ((r_newrefdef.time / 40.0) - (int)(r_newrefdef.time / 40.0));
+		if (scroll == 0.0)
+			scroll = -64.0;
+	}
+
+	uint32_t dynamicOffsets[2] = { uboOffset, vk_dlightUboOffset };
+	VkDescriptorSet descriptorSets[] = {
+		image->vk_texture.descriptorSet,
+		uboDescriptorSet,
+		vk_state.lightmap_textures[lmtex].descriptorSet,
+		vk_dlightUboDescriptorSet
+	};
+	vkCmdBindDescriptorSets(vk_activeCmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		vk_drawPolyLmapPipeline.layout, 0, 4, descriptorSets, 2, dynamicOffsets);
+
+	vkCmdPushConstants(vk_activeCmdbuffer, vk_drawPolyLmapPipeline.layout,
+		VK_SHADER_STAGE_FRAGMENT_BIT, 17 * sizeof(float),
+		sizeof(vk_numDynLights), &vk_numDynLights);
+
+	for (p = surf->polys; p; p = p->chain)
+	{
+		v = p->verts[0];
+		for (i = 0; i < nv; i++, v += VERTEXSIZE)
 		{
-			float scroll;
-
-			scroll = -64 * ((r_newrefdef.time / 40.0) - (int)(r_newrefdef.time / 40.0));
-			if (scroll == 0.0)
-				scroll = -64.0;
-
-			for (p = surf->polys; p; p = p->chain)
-			{
-				v = p->verts[0];
-				for (i = 0; i < nv; i++, v += VERTEXSIZE)
-				{
-					lmappolyverts_buffer[i].vertex[0] = v[0];
-					lmappolyverts_buffer[i].vertex[1] = v[1];
-					lmappolyverts_buffer[i].vertex[2] = v[2];
-					lmappolyverts_buffer[i].texCoord[0] = v[3] + scroll;
-					lmappolyverts_buffer[i].texCoord[1] = v[4];
-					lmappolyverts_buffer[i].texCoordLmap[0] = v[5];
-					lmappolyverts_buffer[i].texCoordLmap[1] = v[6];
-				}
-
-				VkBuffer vbo;
-				VkDeviceSize vboOffset;
-				uint8_t *vertData = QVk_GetVertexBuffer(sizeof(lmappolyvert_t) * nv, &vbo, &vboOffset);
-				memcpy(vertData, lmappolyverts_buffer, sizeof(lmappolyvert_t) * nv);
-
-				VkDescriptorSet descriptorSets[] = {
-					image->vk_texture.descriptorSet,
-					uboDescriptorSet,
-					vk_state.lightmap_textures[lmtex].descriptorSet
-				};
-				vkCmdBindDescriptorSets(vk_activeCmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_drawPolyLmapPipeline.layout, 0, 3, descriptorSets, 1, &uboOffset);
-				vkCmdBindVertexBuffers(vk_activeCmdbuffer, 0, 1, &vbo, &vboOffset);
-				vkCmdBindIndexBuffer(vk_activeCmdbuffer, QVk_GetTriangleFanIbo((nv - 2) * 3), 0, VK_INDEX_TYPE_UINT16);
-				vkCmdDrawIndexed(vk_activeCmdbuffer, (nv - 2) * 3, 1, 0, 0, 0);
-			}
+			lmappolyverts_buffer[i].vertex[0] = v[0];
+			lmappolyverts_buffer[i].vertex[1] = v[1];
+			lmappolyverts_buffer[i].vertex[2] = v[2];
+			lmappolyverts_buffer[i].texCoord[0] = v[3] + scroll;
+			lmappolyverts_buffer[i].texCoord[1] = v[4];
+			lmappolyverts_buffer[i].texCoordLmap[0] = v[5];
+			lmappolyverts_buffer[i].texCoordLmap[1] = v[6];
+			lmappolyverts_buffer[i].normal[0] = normal[0];
+			lmappolyverts_buffer[i].normal[1] = normal[1];
+			lmappolyverts_buffer[i].normal[2] = normal[2];
+			lmappolyverts_buffer[i].lightFlags = lightFlags;
 		}
-		else
-		{
-			//PGM
-			//==========
-			for (p = surf->polys; p; p = p->chain)
-			{
-				v = p->verts[0];
-				for (i = 0; i < nv; i++, v += VERTEXSIZE)
-				{
-					lmappolyverts_buffer[i].vertex[0] = v[0];
-					lmappolyverts_buffer[i].vertex[1] = v[1];
-					lmappolyverts_buffer[i].vertex[2] = v[2];
-					lmappolyverts_buffer[i].texCoord[0] = v[3];
-					lmappolyverts_buffer[i].texCoord[1] = v[4];
-					lmappolyverts_buffer[i].texCoordLmap[0] = v[5];
-					lmappolyverts_buffer[i].texCoordLmap[1] = v[6];
-				}
-				VkBuffer vbo;
-				VkDeviceSize vboOffset;
-				uint8_t *vertData = QVk_GetVertexBuffer(sizeof(lmappolyvert_t) * nv, &vbo, &vboOffset);
-				memcpy(vertData, lmappolyverts_buffer, sizeof(lmappolyvert_t) * nv);
 
-				VkDescriptorSet descriptorSets[] = {
-					image->vk_texture.descriptorSet,
-					uboDescriptorSet,
-					vk_state.lightmap_textures[lmtex].descriptorSet
-				};
-				vkCmdBindDescriptorSets(vk_activeCmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_drawPolyLmapPipeline.layout, 0, 3, descriptorSets, 1, &uboOffset);
-				vkCmdBindVertexBuffers(vk_activeCmdbuffer, 0, 1, &vbo, &vboOffset);
-				vkCmdBindIndexBuffer(vk_activeCmdbuffer, QVk_GetTriangleFanIbo((nv - 2) * 3), 0, VK_INDEX_TYPE_UINT16);
-				vkCmdDrawIndexed(vk_activeCmdbuffer, (nv - 2) * 3, 1, 0, 0, 0);
-			}
-			//==========
-			//PGM
-		}
-		//PGM
-		//==========
+		VkBuffer vbo;
+		VkDeviceSize vboOffset;
+		uint8_t *vertData = QVk_GetVertexBuffer(sizeof(lmappolyvert_t) * nv, &vbo, &vboOffset);
+		memcpy(vertData, lmappolyverts_buffer, sizeof(lmappolyvert_t) * nv);
+
+		vkCmdBindVertexBuffers(vk_activeCmdbuffer, 0, 1, &vbo, &vboOffset);
+		vkCmdBindIndexBuffer(vk_activeCmdbuffer, QVk_GetTriangleFanIbo((nv - 2) * 3), 0, VK_INDEX_TYPE_UINT16);
+		vkCmdDrawIndexed(vk_activeCmdbuffer, (nv - 2) * 3, 1, 0, 0, 0);
 	}
 }
 
@@ -1312,29 +1181,6 @@ void Vk_BeginBuildingLightmaps (model_t *m)
 	r_newrefdef.lightstyles = lightstyles;
 
 	vk_lms.current_lightmap_texture = 0;
-
-	/*
-	** initialize the dynamic lightmap textures
-	*/
-	if (vk_state.lightmap_textures[DYNLIGHTMAP_OFFSET].resource.image == VK_NULL_HANDLE)
-	{
-		for (i = DYNLIGHTMAP_OFFSET; i < MAX_LIGHTMAPS*2; i++)
-		{
-			unsigned	dummy[BLOCK_WIDTH * BLOCK_HEIGHT];
-
-			QVVKTEXTURE_CLEAR(vk_state.lightmap_textures[i]);
-			QVk_CreateTexture(&vk_state.lightmap_textures[i], (unsigned char*)dummy,
-				BLOCK_WIDTH, BLOCK_HEIGHT, vk_current_lmap_sampler, false);
-			QVk_DebugSetObjectName((uint64_t)vk_state.lightmap_textures[i].resource.image,
-				VK_OBJECT_TYPE_IMAGE, va("Image: dynamic lightmap #%d", i));
-			QVk_DebugSetObjectName((uint64_t)vk_state.lightmap_textures[i].imageView,
-				VK_OBJECT_TYPE_IMAGE_VIEW, va("Image View: dynamic lightmap #%d", i));
-			QVk_DebugSetObjectName((uint64_t)vk_state.lightmap_textures[i].descriptorSet,
-				VK_OBJECT_TYPE_DESCRIPTOR_SET, va("Descriptor Set: dynamic lightmap #%d", i));
-			QVk_DebugSetObjectName((uint64_t)vk_state.lightmap_textures[i].resource.memory,
-				VK_OBJECT_TYPE_DEVICE_MEMORY, va("Memory: dynamic lightmap #%d", i));
-		}
-	}
 }
 
 /*

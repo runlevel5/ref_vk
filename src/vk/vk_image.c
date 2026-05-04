@@ -740,7 +740,7 @@ void Vk_LmapTextureMode( char *string )
 	vk_current_lmap_sampler = i;
 
 	vkDeviceWaitIdle(vk_device.logical);
-	for (j = 0; j < MAX_LIGHTMAPS*2; j++)
+	for (j = 0; j < MAX_LIGHTMAPS; j++)
 	{
 		if (vk_state.lightmap_textures[j].resource.image != VK_NULL_HANDLE)
 			QVk_UpdateTextureSampler(&vk_state.lightmap_textures[j], i, vk_state.lightmap_textures[j].clampToEdge);
@@ -1436,7 +1436,7 @@ void	Vk_ShutdownImages (void)
 
 	QVk_ReleaseTexture(&vk_rawTexture);
 
-	for(i = 0; i < MAX_LIGHTMAPS*2; i++)
+	for(i = 0; i < MAX_LIGHTMAPS; i++)
 		QVk_ReleaseTexture(&vk_state.lightmap_textures[i]);
 }
 
